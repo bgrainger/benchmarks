@@ -1,0 +1,3 @@
+[submodule "ext/MySqlConnector"]
+	path = ext/MySqlConnector
+	url = https://github.com/bgrainger/MySqlConnector.git
