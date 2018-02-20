@@ -69,7 +69,7 @@ else
 fi
 
 postgresql="--postgresql \"Server=TFB-database;Database=hello_world;User Id=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size=1024;NoResetOnClose=true;Max Auto Prepare=3\""
-mysql="--mysql \"Server=TFB-database;Database=hello_world;User Id=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size=1024;SslMode=None;ConnectionReset=false\""
+mysql="--mysql \"Server=TFB-database;Database=hello_world;User Id=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size=1024;SslMode=None;ConnectionReset=false;Default Command Timeout=0;Connection Timeout=0\""
 mssql="--mssql \"Server=TFB-database;Database=hello_world;User Id=sa;Password=Benchmarkdbp@55;Max Pool Size=1024;\""
 mongodb="--mongodb \"mongodb://TFB-database:27017?maxPoolSize=1024\""
 
