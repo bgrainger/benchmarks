@@ -10,6 +10,7 @@ Options:
   -c|--client            URL of benchmark client
   -s|--server            URL of benchmark server
   -q|--sql               Connection string of SQL Database to store results
+  --clientName           Name of client to use for testing, e.g. Wrk
   -v|--verbose           Verbose output
   --session              A logical identifier to group related jobs.
   --description          The description of the job.
@@ -39,17 +40,27 @@ Options:
   --header               Header added to request.
   --headers              Default set of HTTP headers added to request (None, Plaintext, Json, Html). Default is Html.
   --method               HTTP method of the request. Default is GET.
-  --script               Name of the script used by wrk.
-  --pipelineDepth        Depth of pipeline used by client.
+  --properties"          Key value pairs of properties specific to the client running. e.g., ScriptName=pipeline;PipelineDepth=16"
   --path                 Relative URL where the client should send requests.
   --querystring          Querystring to add to the requests. (e.g., "?page=1")
   -j|--jobs              The path or url to the jobs definition.
   --collect-trace        Collect a PerfView trace. Optionally set custom arguments. e.g., BufferSize=256;InMemoryCircularBuffer
+  --trace-output         An optional location to download the trace file to, e.g., --trace-output c:\traces
   --before-shutdown      An endpoint to call before the application has shut down.
   -sp|--span             The time during which the client jobs are repeated, in 'HH:mm:ss' format. e.g., 48:00:00 for 2 days
   -t|--table             Table name of the SQL Database to store results
   --no-crossgen          Disables Ready To Run.
   -e|--env               Defines custom envrionment variables to use with the benchmarked application e.g., -e KEY=VALUE -e A=B
+
+Properties of the Wrk client
+
+  ScriptName             Name of the script used by wrk.
+  PipelineDepth          Depth of pipeline used by clients.
+
+Properties of the SignalR client
+  HubProtocol            Name of the hub protocol to be used between client and server.
+  TransportType          Name of the transport to communicate over.
+  LogLevel               LogLevel name for SignalR connections to use. e.g. 'Trace' or 'Warning'
 ```
 
 ### Examples

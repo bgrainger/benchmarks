@@ -8,11 +8,11 @@
     <RuntimeFrameworkVersion>$(BenchmarksRuntimeFrameworkVersion)</RuntimeFrameworkVersion>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(BenchmarksAspNetCoreVersion)' == '2.1.0-*'">
+  <PropertyGroup Condition="$(BenchmarksAspNetCoreVersion.StartsWith('2.1'))">
     <DefineConstants>$(DefineConstants);DOTNET210</DefineConstants>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(BenchmarksAspNetCoreVersion)' == '2.0.0' or '$(BenchmarksAspNetCoreVersion)' == '2.0.1'">
+  <PropertyGroup Condition="$(BenchmarksAspNetCoreVersion.StartsWith('2.0'))">
     <DefineConstants>$(DefineConstants);DOTNET200</DefineConstants>
   </PropertyGroup>
 
@@ -25,12 +25,15 @@
     <PackageReference Include="Dapper" Version="$(DapperVersion)" />
     <PackageReference Include="Jil" Version="$(JilVersion)" />
     <PackageReference Include="MongoDB.Driver" Version="$(MongoDbVersion)" />
+    <PackageReference Include="Microsoft.AspNetCore.Diagnostics" Version="$(BenchmarksAspNetCoreVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc" Version="$(BenchmarksAspNetCoreVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Razor.ViewCompilation" Version="$(BenchmarksAspNetCoreVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.ResponseCaching" Version="$(BenchmarksAspNetCoreVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.Server.HttpSys" Version="$(BenchmarksAspNetCoreVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.Server.Kestrel" Version="$(BenchmarksAspNetCoreVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.Server.Kestrel.Https" Version="$(BenchmarksAspNetCoreVersion)" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR" Version="$(SignalRVersion)" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.MsgPack" Version="$(SignalRVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.StaticFiles" Version="$(BenchmarksAspNetCoreVersion)" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="$(BenchmarksAspNetCoreVersion)" />
     <PackageReference Include="Microsoft.Extensions.Configuration.CommandLine" Version="$(BenchmarksAspNetCoreVersion)" />
@@ -45,11 +48,11 @@
     <PackageReference Include="System.Data.SqlClient" Version="$(SqlClientVersion)" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(BenchmarksAspNetCoreVersion)' == '2.1-*'">
+  <ItemGroup Condition="$(BenchmarksAspNetCoreVersion.StartsWith('2.1'))">
     <PackageReference Include="Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets" Version="$(BenchmarksAspNetCoreVersion)" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(BenchmarksAspNetCoreVersion)' == '2.0-*'">
+  <ItemGroup Condition="$(BenchmarksAspNetCoreVersion.StartsWith('2.0'))">
     <!-- Sockets where only available as a preview package for 2.0 -->
     <PackageReference Include="Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets" Version="2.0.0-*" />
   </ItemGroup>

@@ -100,6 +100,9 @@ namespace Benchmarks.Configuration
         [ScenarioPath("/fortunes/raw")]
         public bool DbFortunesRaw { get; set; }
 
+        [ScenarioPath("/fortunes/raw-sync")]
+        public bool DbFortunesRawSync { get; set; }
+
         [ScenarioPath("/fortunes/ef")]
         public bool DbFortunesEf { get; set; }
 
@@ -147,6 +150,9 @@ namespace Benchmarks.Configuration
 
         [ScenarioPath("/mvc/fortunes/dapper")]
         public bool MvcDbFortunesDapper { get; set; }
+
+        [ScenarioPath("/signalr/broadcast")]
+        public bool SignalRBroadcast { get; set; }
 
         public bool Any(string partialName) =>
             typeof(Scenarios).GetTypeInfo().DeclaredProperties

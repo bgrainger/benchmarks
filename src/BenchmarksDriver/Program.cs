@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Data.SqlClient;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -13,10 +12,10 @@ using System.Threading.Tasks;
 using System.Web;
 using Benchmarks.ClientJob;
 using Benchmarks.ServerJob;
-using Microsoft.Extensions.CommandLineUtils;
+using BenchmarksWorkers;
+using McMaster.Extensions.CommandLineUtils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using OperatingSystem = Benchmarks.ServerJob.OperatingSystem;
 
 namespace BenchmarksDriver
 {
@@ -29,13 +28,17 @@ namespace BenchmarksDriver
         private static ClientJob _clientJob;
         private static string _tableName = "AspNetBenchmarks";
 
+        // Default to arguments which should be sufficient for collecting trace of default Plaintext run
+        private const string _defaultTraceArguments = "BufferSize=1024";
+
         public static int Main(string[] args)
         {
             var app = new CommandLineApplication()
             {
                 Name = "BenchmarksDriver",
                 FullName = "ASP.NET Benchmark Driver",
-                Description = "Driver for ASP.NET Benchmarks"
+                Description = "Driver for ASP.NET Benchmarks",
+                ResponseFileHandling = ResponseFileHandling.ParseArgsAsSpaceSeparated
             };
 
             app.HelpOption("-?|-h|--help");
@@ -43,6 +46,8 @@ namespace BenchmarksDriver
             // Driver Options
             var clientOption = app.Option("-c|--client",
                 "URL of benchmark client", CommandOptionType.SingleValue);
+            var clientNameOption = app.Option("--clientName",
+                "Name of client to use for testing, e.g. Wrk", CommandOptionType.SingleValue);
             var serverOption = app.Option("-s|--server",
                 "URL of benchmark server", CommandOptionType.SingleValue);
             var sqlConnectionStringOption = app.Option("-q|--sql",
@@ -108,7 +113,12 @@ namespace BenchmarksDriver
                 "\"--runtimeFile c:\\build\\System.Net.Security.dll\"",
                 CommandOptionType.MultipleValue);
             var collectTraceOption = app.Option("--collect-trace",
-                "Collect a PerfView trace. Optionally set custom arguments. e.g., BufferSize=256;InMemoryCircularBuffer", CommandOptionType.NoValue);
+                "Collect a PerfView trace.", CommandOptionType.NoValue);
+            var traceArgumentsOption = app.Option("--trace-arguments",
+                $"Arguments used when collecting a PerfView trace.  Defaults to \"{_defaultTraceArguments}\".",
+                CommandOptionType.SingleValue);
+            var traceOutputOption = app.Option("--trace-output",
+                "An optional location to download the trace file to, e.g., --trace-output c:\traces", CommandOptionType.SingleValue);
             var disableR2ROption = app.Option("--no-crossgen",
                 "Disables Ready To Run.", CommandOptionType.NoValue);
             var collectR2RLogOption = app.Option("--collect-crossgen",
@@ -133,10 +143,8 @@ namespace BenchmarksDriver
                 "Default set of HTTP headers added to request (None, Plaintext, Json, Html). Default is Html.", CommandOptionType.SingleValue);
             var methodOption = app.Option("--method",
                 "HTTP method of the request. Default is GET.", CommandOptionType.SingleValue);
-            var scriptNameOption = app.Option("--script",
-                "Name of the script used by wrk.", CommandOptionType.SingleValue);
-            var pipelineDepthOption = app.Option("--pipelineDepth",
-                "Depth of pipeline used by client.", CommandOptionType.SingleValue);
+            var clientProperties = app.Option("--properties",
+                "Key value pairs of properties specific to the client running. e.g., ScriptName=pipeline;PipelineDepth=16", CommandOptionType.SingleValue);
             var pathOption = app.Option(
                 "--path",
                 "Relative URL where the client should send requests.",
@@ -379,13 +387,10 @@ namespace BenchmarksDriver
                 if (collectTraceOption.HasValue())
                 {
                     serverJob.Collect = true;
-
-                    serverJob.CollectArguments = collectTraceOption.Value();
-
-                    // Clear the arguments if the value is "on" as this is a marker for NoValue on the command parser
-                    if (serverJob.CollectArguments == "on")
+                    serverJob.CollectArguments = _defaultTraceArguments;
+                    if (traceArgumentsOption.HasValue())
                     {
-                        serverJob.CollectArguments = "";
+                        serverJob.CollectArguments = string.Join(';', serverJob.CollectArguments, traceArgumentsOption.Value());
                     }
                 }
                 if (disableR2ROption.HasValue())
@@ -421,45 +426,17 @@ namespace BenchmarksDriver
                     }
                 }
 
-                var attachments = new List<Attachment>();
-
+                // Check all attachments exist
                 if (outputFileOption.HasValue())
                 {
                     foreach (var outputFile in outputFileOption.Values)
                     {
-                        var attachment = new Attachment { Location = AttachmentLocation.Output };
+                        var fileSegments = outputFile.Split(';');
+                        var filename = fileSegments[0];
 
-                        try
+                        if (!File.Exists(filename))
                         {
-                            var outputFileSegments = outputFile.Split(';');
-
-                            attachment.Filename = outputFileSegments[0];
-
-                            if (attachment.Filename.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                            {
-                                attachment.Content = _httpClient.GetByteArrayAsync(attachment.Filename).GetAwaiter().GetResult();
-                            }
-                            else
-                            {
-                                attachment.Content = File.ReadAllBytes(attachment.Filename);
-                            }
-
-                            attachment.Filename = Path.GetFileName(attachment.Filename);
-
-                            if (outputFileSegments.Length > 1)
-                            {
-                                attachment.Filename = outputFileSegments[1];
-                            }
-                            else
-                            {
-                                attachment.Filename = Path.GetFileName(attachment.Filename);
-                            }
-
-                            attachments.Add(attachment);
-                        }
-                        catch
-                        {
-                            Console.WriteLine($"Output File '{attachment.Filename}' could not be loaded.");
+                            Console.WriteLine($"Output File '{filename}' could not be loaded.");
                             return 8;
                         }
                     }
@@ -469,45 +446,16 @@ namespace BenchmarksDriver
                 {
                     foreach (var runtimeFile in runtimeFileOption.Values)
                     {
-                        var attachment = new Attachment { Location = AttachmentLocation.Runtime };
+                        var fileSegments = runtimeFile.Split(';');
+                        var filename = fileSegments[0];
 
-                        try
+                        if (!File.Exists(filename))
                         {
-                            var runtimeFileSegments = runtimeFile.Split(';');
-
-                            attachment.Filename = runtimeFileSegments[0];
-
-                            if (attachment.Filename.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-                            {
-                                attachment.Content = _httpClient.GetByteArrayAsync(attachment.Filename).GetAwaiter().GetResult();
-                            }
-                            else
-                            {
-                                attachment.Content = File.ReadAllBytes(attachment.Filename);
-                            }
-
-                            attachment.Filename = Path.GetFileName(attachment.Filename);
-
-                            if (runtimeFileSegments.Length > 1)
-                            {
-                                attachment.Filename = runtimeFileSegments[1];
-                            }
-                            else
-                            {
-                                attachment.Filename = Path.GetFileName(attachment.Filename);
-                            }
-
-                            attachments.Add(attachment);
-                        }
-                        catch
-                        {
-                            Console.WriteLine($"Runtime File '{attachment.Filename}' could not be loaded.");
+                            Console.WriteLine($"Runtime File '{filename}' could not be loaded.");
                             return 8;
                         }
                     }
                 }
-
-                serverJob.Attachments = attachments.ToArray();
 
                 foreach (var source in sourceOption.Values)
                 {
@@ -529,6 +477,19 @@ namespace BenchmarksDriver
                 mergedClientJob.Merge(job);
                 _clientJob = mergedClientJob.ToObject<ClientJob>();
 
+                if (clientNameOption.HasValue())
+                {
+                    if (!Enum.TryParse<Worker>(clientNameOption.Value(), ignoreCase: true, result: out var worker))
+                    {
+                        Log($"Could not find worker {clientNameOption.Value()}");
+                        return 9;
+                    }
+
+                    _clientJob.Client = worker;
+                }
+
+                Log($"Using worker {_clientJob.Client}");
+
                 // Override default ClientJob settings if options are set
                 if (connectionsOption.HasValue())
                 {
@@ -546,19 +507,16 @@ namespace BenchmarksDriver
                 {
                     _clientJob.Warmup = int.Parse(warmupOption.Value());
                 }
-                if (pipelineDepthOption.HasValue())
+                if (clientProperties.HasValue())
                 {
-                    _clientJob.PipelineDepth = int.Parse(pipelineDepthOption.Value());
-
-                    if (_clientJob.PipelineDepth > 0)
+                    var properties = clientProperties.Value().Split(';');
+                    foreach (var kvp in properties)
                     {
-                        _clientJob.ScriptName = "pipeline";
+                        var values = kvp.Split('=');
+                        _clientJob.ClientProperties[values[0]] = values[1];
                     }
                 }
-                if (scriptNameOption.HasValue())
-                {
-                    _clientJob.ScriptName = scriptNameOption.Value();
-                }
+
                 if (methodOption.HasValue())
                 {
                     _clientJob.Method = methodOption.Value();
@@ -608,8 +566,45 @@ namespace BenchmarksDriver
                     }
                 }
 
-                return Run(new Uri(server), new Uri(client), sqlConnectionString, serverJob, session, description, iterations, exclude, shutdownOption.Value(), span, downloadFilesOption.Values, collectR2RLogOption.HasValue()).Result;
+                return Run(
+                    new Uri(server), 
+                    new Uri(client), 
+                    sqlConnectionString, 
+                    serverJob, 
+                    session, 
+                    description, 
+                    iterations, 
+                    exclude, 
+                    shutdownOption.Value(), 
+                    span, 
+                    downloadFilesOption.Values, 
+                    collectR2RLogOption.HasValue(),
+                    traceOutputOption.Value(),
+                    outputFileOption,
+                    runtimeFileOption
+                    ).Result;
             });
+
+            // Resolve reponse files from urls
+
+            for (var i = 0; i < args.Length; i++)
+            {
+                if (args[i].StartsWith("@http", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var tempFilename = Path.GetTempFileName();
+                        var filecontent = _httpClient.GetStringAsync(args[i].Substring(1)).GetAwaiter().GetResult();
+                        File.WriteAllText(tempFilename, filecontent);
+                        args[i] = "@" + tempFilename;
+                    }
+                    catch
+                    {
+                        Console.WriteLine($"Invalid reponse file url '{args[i].Substring(1)}'");
+                        return -1;
+                    }
+                }
+            }
 
             return app.Execute(args);
         }
@@ -626,7 +621,10 @@ namespace BenchmarksDriver
             string shutdownEndpoint,
             TimeSpan span,
             List<string> downloadFiles,
-            bool collectR2RLog)
+            bool collectR2RLog,
+            string traceDestination,
+            CommandOption outputFileOption,
+            CommandOption runtimeFileOption)
         {
             var scenario = serverJob.Scenario;
             var serverJobsUri = new Uri(serverUri, "/jobs");
@@ -636,6 +634,13 @@ namespace BenchmarksDriver
 
             var results = new List<Statistics>();
             ClientJob clientJob = null;
+
+            var serializer = WorkerFactory.CreateResultSerializer(_clientJob);
+
+            if (serializer != null && !string.IsNullOrWhiteSpace(sqlConnectionString))
+            {
+                await serializer.InitializeDatabaseAsync(sqlConnectionString, _tableName);
+            }
 
             var content = JsonConvert.SerializeObject(serverJob);
 
@@ -660,6 +665,73 @@ namespace BenchmarksDriver
                     response.EnsureSuccessStatusCode();
 
                     serverJobUri = new Uri(serverUri, response.Headers.Location);
+
+                    while (true)
+                    {
+                        LogVerbose($"GET {serverJobUri}...");
+                        response = await _httpClient.GetAsync(serverJobUri);
+                        responseContent = await response.Content.ReadAsStringAsync();
+
+                        LogVerbose($"{(int)response.StatusCode} {response.StatusCode} {responseContent}");
+
+                        serverJob = JsonConvert.DeserializeObject<ServerJob>(responseContent);
+
+                        if (!serverJob.Hardware.HasValue)
+                        {
+                            throw new InvalidOperationException("Server is required to set ServerJob.Hardware.");
+                        }
+
+                        if (String.IsNullOrWhiteSpace(serverJob.HardwareVersion))
+                        {
+                            throw new InvalidOperationException("Server is required to set ServerJob.HardwareVersion.");
+                        }
+
+                        if (!serverJob.OperatingSystem.HasValue)
+                        {
+                            throw new InvalidOperationException("Server is required to set ServerJob.OperatingSystem.");
+                        }
+
+                        if (serverJob.State == ServerState.Initializing)
+                        {
+                            // Uploading attachments
+                            if (outputFileOption.HasValue())
+                            {
+                                foreach (var outputFile in outputFileOption.Values)
+                                {
+                                    var result = await UploadFileAsync(outputFile, AttachmentLocation.Output, serverJob, serverJobUri);
+
+                                    if (result != 0)
+                                    {
+                                        return result;
+                                    }                                    
+                                }
+                            }
+
+                            if (runtimeFileOption.HasValue())
+                            {
+                                foreach (var runtimeFile in runtimeFileOption.Values)
+                                {
+                                    var result = await UploadFileAsync(runtimeFile, AttachmentLocation.Runtime, serverJob, serverJobUri);
+
+                                    if (result != 0)
+                                    {
+                                        return result;
+                                    }
+                                }
+                            }
+
+                            response = await _httpClient.PostAsync(serverJobUri + "/start", new StringContent(""));
+                            responseContent = await response.Content.ReadAsStringAsync();
+                            LogVerbose($"{(int)response.StatusCode} {response.StatusCode}");
+                            response.EnsureSuccessStatusCode();
+
+                            break;
+                        }
+                        else
+                        {
+                            await Task.Delay(1000);
+                        }
+                    }
 
                     var serverBenchmarkUri = (string)null;
                     while (true)
@@ -732,10 +804,7 @@ namespace BenchmarksDriver
                             if (spanLoop > 0)
                             {
                                 results.Clear();
-
-                                serverJob.ClearServerCounters();
-                                content = JsonConvert.SerializeObject(serverJob);
-                                response = await _httpClient.PutAsync(serverJobsUri, new StringContent(content, Encoding.UTF8, "application/json"));
+                                response = await _httpClient.PostAsync(serverJobUri + "/resetstats", new StringContent(""));
                                 response.EnsureSuccessStatusCode();
                             }
                         }
@@ -858,13 +927,26 @@ namespace BenchmarksDriver
                                 Log($"Downloading trace...");
 
                                 var filename = "trace.etl.zip";
+
+                                if (!String.IsNullOrEmpty(traceDestination))
+                                {
+                                    filename = Path.Combine(traceDestination, filename);
+                                }
+
                                 var counter = 1;
                                 while (File.Exists(filename))
                                 {
-                                    filename = $"trace({counter++}).etl.zip";
+                                    filename = $"trace ({counter++}).etl.zip";
+
+                                    if (!String.IsNullOrEmpty(traceDestination))
+                                    {
+                                        filename = Path.Combine(traceDestination, filename);
+                                    }
                                 }
 
                                 await File.WriteAllBytesAsync(filename, await _httpClient.GetByteArrayAsync(uri));
+
+                                Log($"Trace created at {filename}");
                             }
 
                             var shouldComputeResults = results.Any() && iterations == i;
@@ -894,6 +976,11 @@ namespace BenchmarksDriver
                                     Duration = Math.Round(samples.Average(x => x.Duration))
                                 };
 
+                                if (serializer != null)
+                                {
+                                    serializer.ComputeAverages(average, samples);
+                                }
+
                                 Log($"RequestsPerSecond:           {average.RequestsPerSecond}");
                                 Log($"Latency on load (ms):        {average.LatencyOnLoad}");
                                 Log($"Max CPU (%):                 {average.Cpu}");
@@ -903,160 +990,24 @@ namespace BenchmarksDriver
                                 Log($"Latency (ms):                {average.Latency}");
                                 Log($"Socket Errors:               {average.SocketErrors}");
                                 Log($"Bad Responses:               {average.BadResponses}");
+                                Log($"SDK:                         {serverJob.SdkVersion}");
+                                Log($"Runtime:                     {serverJob.RuntimeVersion}");
+                                Log($"ASP.NET Core:                {serverJob.AspNetCoreVersion}");
 
-                                if (!string.IsNullOrWhiteSpace(sqlConnectionString))
+                                if (serializer != null && !String.IsNullOrEmpty(sqlConnectionString))
                                 {
                                     Log("Writing results to SQL...");
 
-                                    await WriteJobsToSql(
+                                    await serializer.WriteJobResultsToSqlAsync(
                                         serverJob: serverJob,
                                         clientJob: clientJob,
                                         connectionString: sqlConnectionString,
+                                        tableName: _tableName,
                                         path: serverJob.Path,
                                         session: session,
                                         description: description,
-                                        dimension: "RequestsPerSecond",
-                                        value: average.RequestsPerSecond);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "Startup Main (ms)",
-                                        value: average.StartupMain);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "First Request (ms)",
-                                        value: average.FirstRequest);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "WorkingSet (MB)",
-                                        value: average.WorkingSet);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "CPU",
-                                        value: average.Cpu);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        session: session,
-                                        description: description,
-                                        path: serverJob.Path,
-                                        dimension: "Latency (ms)",
-                                        value: average.Latency);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "LatencyAverage (ms)",
-                                        value: average.LatencyAverage);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "Latency50Percentile (ms)",
-                                        value: average.Latency50Percentile);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "Latency75Percentile (ms)",
-                                        value: average.Latency75Percentile);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "Latency90Percentile (ms)",
-                                        value: average.Latency90Percentile);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "Latency99Percentile (ms)",
-                                        value: average.Latency99Percentile);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "SocketErrors",
-                                        value: average.SocketErrors);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "BadResponses",
-                                        value: average.BadResponses);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "TotalRequests",
-                                        value: average.TotalRequests);
-
-                                    await WriteJobsToSql(
-                                        serverJob: serverJob,
-                                        clientJob: clientJob,
-                                        connectionString: sqlConnectionString,
-                                        path: serverJob.Path,
-                                        session: session,
-                                        description: description,
-                                        dimension: "Duration (ms)",
-                                        value: average.Duration);
+                                        statistics: average,
+                                        longRunning: span > TimeSpan.Zero);
                                 }
                             }
                         }
@@ -1152,6 +1103,44 @@ namespace BenchmarksDriver
             return 0;
         }
 
+        private static async Task<int> UploadFileAsync(string filename, AttachmentLocation location, ServerJob serverJob, Uri serverJobUri)
+        {
+            try
+            {
+                var outputFileSegments = filename.Split(';');
+                var attachmentFilename = outputFileSegments[0];
+
+                if (!File.Exists(attachmentFilename))
+                {
+                    Console.WriteLine($"Output File '{attachmentFilename}' could not be loaded.");
+                    return 8;
+                }
+
+                var destinationFilename = outputFileSegments.Length > 1
+                    ? outputFileSegments[1]
+                    : Path.GetFileName(attachmentFilename);
+
+                var requestContent = new MultipartFormDataContent();
+
+                var fileContent = attachmentFilename.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+                    ? new StreamContent(await _httpClient.GetStreamAsync(attachmentFilename))
+                    : new StreamContent(new FileStream(attachmentFilename, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1, FileOptions.Asynchronous | FileOptions.SequentialScan));
+
+                requestContent.Add(fileContent, nameof(AttachmentViewModel.Content), Path.GetFileName(attachmentFilename));
+                requestContent.Add(new StringContent(serverJob.Id.ToString()), nameof(AttachmentViewModel.Id));
+                requestContent.Add(new StringContent(destinationFilename), nameof(AttachmentViewModel.DestinationFilename));
+                requestContent.Add(new StringContent(AttachmentLocation.Output.ToString()), nameof(AttachmentViewModel.Location));
+
+                await _httpClient.PostAsync(serverJobUri + "/attachment", requestContent);
+            }
+            catch (Exception e)
+            {
+                throw new InvalidOperationException($"An error occured while uploading a file.", e);
+            }
+
+            return 0;
+        }
+
         private static async Task<ClientJob> RunClientJob(string scenarioName, Uri clientUri, Uri serverJobUri, string serverBenchmarkUri)
         {
             var clientJob = new ClientJob(_clientJob) { ServerBenchmarkUri = serverBenchmarkUri };
@@ -1175,7 +1164,7 @@ namespace BenchmarksDriver
                 while (true)
                 {
                     // Retry block, prevent any network communication error from stopping the job
-                    await RetryOnException(3, async () =>
+                    await RetryOnExceptionAsync(5, async () =>
                     {
                         // Ping server job to keep it alive
                         LogVerbose($"GET {serverJobUri}/touch...");
@@ -1203,7 +1192,7 @@ namespace BenchmarksDriver
                 while (true)
                 {
                     // Retry block, prevent any network communication error from stopping the job
-                    await RetryOnException(3, async () =>
+                    await RetryOnExceptionAsync(5, async () =>
                     {
                         // Ping server job to keep it alive
                         LogVerbose($"GET {serverJobUri}/touch...");
@@ -1247,7 +1236,7 @@ namespace BenchmarksDriver
                 {
                     HttpResponseMessage response = null;
 
-                    await RetryOnException(3, async () =>
+                    await RetryOnExceptionAsync(5, async () =>
                     {
                         Log($"Stopping scenario {scenarioName} on benchmark client...");
 
@@ -1272,228 +1261,6 @@ namespace BenchmarksDriver
             Console.WriteLine(await _httpClient.GetStringAsync(uri));
         }
 
-        private static Task WriteJobsToSql(ServerJob serverJob, ClientJob clientJob, string connectionString, string path, string session, string description, string dimension, double value)
-        {
-            return WriteResultsToSql(
-                        connectionString: connectionString,
-                        scenario: serverJob.Scenario,
-                        session: session,
-                        description: description,
-                        aspnetCoreVersion: serverJob.AspNetCoreVersion,
-                        runtimeVersion: serverJob.RuntimeVersion,
-                        hardware: serverJob.Hardware.Value,
-                        hardwareVersion: serverJob.HardwareVersion,
-                        operatingSystem: serverJob.OperatingSystem.Value,
-                        scheme: serverJob.Scheme,
-                        sources: serverJob.ReferenceSources,
-                        connectionFilter: serverJob.ConnectionFilter,
-                        webHost: serverJob.WebHost,
-                        kestrelThreadCount: serverJob.KestrelThreadCount,
-                        clientThreads: clientJob.Threads,
-                        connections: clientJob.Connections,
-                        duration: clientJob.Duration,
-                        pipelineDepth: clientJob.PipelineDepth,
-                        path: path,
-                        method: clientJob.Method,
-                        headers: clientJob.Headers,
-                        dimension: dimension,
-                        value: value,
-                        runtimeStore: serverJob.UseRuntimeStore);
-        }
-        private static async Task WriteResultsToSql(
-            string connectionString,
-            string session,
-            string description,
-            string aspnetCoreVersion,
-            string runtimeVersion,
-            string scenario,
-            Hardware hardware,
-            string hardwareVersion,
-            OperatingSystem operatingSystem,
-            Scheme scheme,
-            IEnumerable<Source> sources,
-            string connectionFilter,
-            WebHost webHost,
-            int? kestrelThreadCount,
-            int clientThreads,
-            int connections,
-            int duration,
-            int? pipelineDepth,
-            string path,
-            string method,
-            IDictionary<string, string> headers,
-            string dimension,
-            double value,
-            bool runtimeStore)
-        {
-            string createCmd =
-                @"
-                IF OBJECT_ID(N'dbo." + _tableName + @"', N'U') IS NULL
-                BEGIN
-                    CREATE TABLE [dbo].[" + _tableName + @"](
-                        [Id] [int] IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                        [Excluded] [bit] DEFAULT 0,
-                        [DateTime] [datetimeoffset](7) NOT NULL,
-                        [Session] [nvarchar](200) NOT NULL,
-                        [Description] [nvarchar](200),
-                        [AspNetCoreVersion] [nvarchar](50) NOT NULL,
-                        [RuntimeVersion] [nvarchar](50) NOT NULL,
-                        [Scenario] [nvarchar](50) NOT NULL,
-                        [Hardware] [nvarchar](50) NOT NULL,
-                        [HardwareVersion] [nvarchar](128) NOT NULL,
-                        [OperatingSystem] [nvarchar](50) NOT NULL,
-                        [Framework] [nvarchar](50) NOT NULL,
-                        [RuntimeStore] [bit] NOT NULL,
-                        [Scheme] [nvarchar](50) NOT NULL,
-                        [Sources] [nvarchar](50) NULL,
-                        [ConnectionFilter] [nvarchar](50) NULL,
-                        [WebHost] [nvarchar](50) NOT NULL,
-                        [KestrelThreadCount] [int] NULL,
-                        [ClientThreads] [int] NOT NULL,
-                        [Connections] [int] NOT NULL,
-                        [Duration] [int] NOT NULL,
-                        [PipelineDepth] [int] NULL,
-                        [Path] [nvarchar](200) NULL,
-                        [Method] [nvarchar](50) NOT NULL,
-                        [Headers] [nvarchar](max) NULL,
-                        [Dimension] [nvarchar](50) NOT NULL,
-                        [Value] [float] NOT NULL
-                    )
-                END
-                ";
-
-            string insertCmd =
-                @"
-                INSERT INTO [dbo].[" + _tableName + @"]
-                           ([DateTime]
-                           ,[Session]
-                           ,[Description]
-                           ,[AspNetCoreVersion]
-                           ,[RuntimeVersion]
-                           ,[Scenario]
-                           ,[Hardware]
-                           ,[HardwareVersion]
-                           ,[OperatingSystem]
-                           ,[Framework]
-                           ,[RuntimeStore]
-                           ,[Scheme]
-                           ,[Sources]
-                           ,[ConnectionFilter]
-                           ,[WebHost]
-                           ,[KestrelThreadCount]
-                           ,[ClientThreads]
-                           ,[Connections]
-                           ,[Duration]
-                           ,[PipelineDepth]
-                           ,[Path]
-                           ,[Method]
-                           ,[Headers]
-                           ,[Dimension]
-                           ,[Value])
-                     VALUES
-                           (@DateTime
-                           ,@Session
-                           ,@Description
-                           ,@AspNetCoreVersion
-                           ,@RuntimeVersion
-                           ,@Scenario
-                           ,@Hardware
-                           ,@HardwareVersion
-                           ,@OperatingSystem
-                           ,@Framework
-                           ,@RuntimeStore
-                           ,@Scheme
-                           ,@Sources
-                           ,@ConnectionFilter
-                           ,@WebHost
-                           ,@KestrelThreadCount
-                           ,@ClientThreads
-                           ,@Connections
-                           ,@Duration
-                           ,@PipelineDepth
-                           ,@Path
-                           ,@Method
-                           ,@Headers
-                           ,@Dimension
-                           ,@Value)
-                ";
-
-            using (var connection = new SqlConnection(connectionString))
-            {
-                await connection.OpenAsync();
-
-                using (var command = new SqlCommand(createCmd, connection))
-                {
-                    await command.ExecuteNonQueryAsync();
-                }
-
-                using (var command = new SqlCommand(insertCmd, connection))
-                {
-                    var p = command.Parameters;
-                    p.AddWithValue("@DateTime", DateTimeOffset.UtcNow);
-                    p.AddWithValue("@Session", session);
-                    p.AddWithValue("@Description", description);
-                    p.AddWithValue("@AspNetCoreVersion", aspnetCoreVersion);
-                    p.AddWithValue("@RuntimeVersion", aspnetCoreVersion);
-                    p.AddWithValue("@Scenario", scenario.ToString());
-                    p.AddWithValue("@Hardware", hardware.ToString());
-                    p.AddWithValue("@HardwareVersion", hardwareVersion);
-                    p.AddWithValue("@OperatingSystem", operatingSystem.ToString());
-                    p.AddWithValue("@Framework", "Core");
-                    p.AddWithValue("@RuntimeStore", runtimeStore);
-                    p.AddWithValue("@Scheme", scheme.ToString().ToLowerInvariant());
-                    p.AddWithValue("@Sources", sources.Any() ? (object)ConvertToSqlString(sources) : DBNull.Value);
-                    p.AddWithValue("@ConnectionFilter",
-                        string.IsNullOrEmpty(connectionFilter) ? (object)DBNull.Value : connectionFilter);
-                    p.AddWithValue("@WebHost", webHost.ToString());
-                    p.AddWithValue("@KestrelThreadCount", (object)kestrelThreadCount ?? DBNull.Value);
-                    p.AddWithValue("@ClientThreads", clientThreads);
-                    p.AddWithValue("@Connections", connections);
-                    p.AddWithValue("@Duration", duration);
-                    p.AddWithValue("@PipelineDepth", (object)pipelineDepth ?? DBNull.Value);
-                    p.AddWithValue("@Path", string.IsNullOrEmpty(path) ? (object)DBNull.Value : path);
-                    p.AddWithValue("@Method", method.ToString().ToUpperInvariant());
-                    p.AddWithValue("@Headers", headers.Any() ? JsonConvert.SerializeObject(headers) : (object)DBNull.Value);
-                    p.AddWithValue("@Dimension", dimension);
-                    p.AddWithValue("@Value", value);
-
-                    await command.ExecuteNonQueryAsync();
-                }
-            }
-        }
-
-        private static string ConvertToSqlString(IEnumerable<Source> sources)
-        {
-            return string.Join(",", sources.Select(s => ConvertToSqlString(s)));
-        }
-
-        private static string ConvertToSqlString(Source source)
-        {
-            const string aspnetPrefix = "https://github.com/aspnet/";
-            const string gitSuffix = ".git";
-
-            var shortRepository = source.Repository;
-
-            if (shortRepository.StartsWith(aspnetPrefix))
-            {
-                shortRepository = shortRepository.Substring(aspnetPrefix.Length);
-            }
-
-            if (shortRepository.EndsWith(gitSuffix))
-            {
-                shortRepository = shortRepository.Substring(0, shortRepository.Length - gitSuffix.Length);
-            }
-
-            if (string.IsNullOrEmpty(source.BranchOrCommit))
-            {
-                return shortRepository;
-            }
-            else
-            {
-                return shortRepository + "@" + source.BranchOrCommit;
-            }
-        }
-
         private static void QuietLog(string message)
         {
             Console.Write(message);
@@ -1513,7 +1280,7 @@ namespace BenchmarksDriver
             }
         }
 
-        private static T RetryOnException<T>(int retries, Func<T> operation, int millisSecondsDelay = 0)
+        private async static Task RetryOnExceptionAsync(int retries, Func<Task> operation, int milliSecondsDelay = 0)
         {
             var attempts = 0;
             do
@@ -1521,7 +1288,8 @@ namespace BenchmarksDriver
                 try
                 {
                     attempts++;
-                    return operation();
+                    await operation();
+                    return;
                 }
                 catch (Exception e)
                 {
@@ -1532,9 +1300,9 @@ namespace BenchmarksDriver
 
                     Log($"Attempt {attempts} failed: {e.Message}");
 
-                    if (millisSecondsDelay > 0)
+                    if (milliSecondsDelay > 0)
                     {
-                        Task.Delay(millisSecondsDelay).GetAwaiter().GetResult();
+                        await Task.Delay(milliSecondsDelay);
                     }
                 }
             } while (true);

@@ -25,6 +25,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Repository;
 
 using OperatingSystem = Benchmarks.ServerJob.OperatingSystem;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace BenchmarkServer
 {
@@ -33,14 +35,15 @@ namespace BenchmarkServer
         private static readonly HttpClient _httpClient;
         private static readonly HttpClientHandler _httpClientHandler;
         private static readonly string _dotnetInstallRepoUrl = "https://raw.githubusercontent.com/dotnet/cli/master/scripts/obtain/";
+        private static readonly string _latestAspnetCoreRuntimeUrl = "https://dotnet.myget.org/F/aspnetcore-dev/api/v3/registration1/aspnetcoreruntime/index.json";
         private static readonly string[] _dotnetInstallPaths = new string[] { "dotnet-install.sh", "dotnet-install.ps1" };
         private static readonly string _sdkVersionUrl = "https://raw.githubusercontent.com/aspnet/BuildTools/dev/files/KoreBuild/config/sdk.version";
         private static readonly string _universeDependenciesUrl = "https://raw.githubusercontent.com/aspnet/Universe/dev/build/dependencies.props";
         private static readonly string _perfviewUrl = "https://github.com/Microsoft/perfview/releases/download/P2.0.2/PerfView.exe";
 
         // Cached lists of SDKs and runtimes already installed
-        private static readonly List<string> _installedRuntimes = new List<string>();
-        private static readonly List<string> _installedSdks = new List<string>();
+        private static readonly HashSet<string> _installedRuntimes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> _installedSdks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private const string _defaultUrl = "http://*:5001";
         private static readonly string _defaultHostname = Environment.MachineName.ToLowerInvariant();
@@ -262,8 +265,32 @@ namespace BenchmarkServer
 
                 while (!cancellationToken.IsCancellationRequested)
                 {
-                    var allJobs = _jobs.GetAll();
-                    var job = allJobs.FirstOrDefault();
+                    ServerJob job = null;
+
+                    // Find the first job that is not in Initializing state
+                    foreach(var j in _jobs.GetAll())
+                    {
+                        if (j.State == ServerState.Initializing)
+                        {
+                            var now = DateTime.UtcNow;
+
+                            if (now - j.LastDriverCommunicationUtc > TimeSpan.FromSeconds(30))
+                            {
+                                // The job needs to be deleted
+                                Log.WriteLine($"Driver didn't communicate for {now - j.LastDriverCommunicationUtc}. Halting job.");
+                                j.State = ServerState.Deleting;
+                            }
+                            else
+                            {
+                                // Initializing jobs are skipped
+                                continue;
+                            }
+                        }
+
+                        job = j;
+                        break;
+                    }
+
                     if (job != null)
                     {
                         string dotnetDir = dotnetHome;
@@ -520,6 +547,20 @@ namespace BenchmarkServer
                                 DeleteDir(dotnetDir);
                             }
 
+                            // Clean attachments
+
+                            foreach (var attachment in job.Attachments)
+                            {
+                                try
+                                {
+                                    File.Delete(attachment.TempFilename);
+                                }
+                                catch
+                                {
+                                    Log.WriteLine($"Error while deleting attachment '{attachment.TempFilename}'");
+                                }
+                            }
+
                             tempDir = null;
 
                             _jobs.Remove(job.Id);
@@ -677,6 +718,9 @@ namespace BenchmarkServer
                 {
                     Git.Checkout(Path.Combine(path, dir), source.BranchOrCommit);
                 }
+
+                Git.InitSubModules(Path.Combine(path, dir));
+
                 dirs.Add(dir);
             }
 
@@ -731,14 +775,12 @@ namespace BenchmarkServer
             string runtimeFrameworkVersion;
             string aspNetCoreVersion;
 
-            if (job.RuntimeVersion != "Current")
+            if (!String.Equals(job.RuntimeVersion, "Current", StringComparison.OrdinalIgnoreCase))
             {
-                env["KOREBUILD_DOTNET_VERSION"] = ""; // Using "" downloads the latest SDK.
                 File.WriteAllText(Path.Combine(benchmarkedApp, "global.json"), "{  \"sdk\": { \"version\": \"" + sdkVersion + "\" } }");
                 targetFramework = "netcoreapp2.1";
-                aspNetCoreVersion = "2.1-*";
 
-                if (job.RuntimeVersion == "Latest")
+                if (String.Equals(job.RuntimeVersion, "Latest", StringComparison.OrdinalIgnoreCase))
                 {
                     runtimeFrameworkVersion = await GetLatestRuntimeVersion(buildToolsPath);
                 }
@@ -751,21 +793,21 @@ namespace BenchmarkServer
             else
             {
                 // Latest public version
-                env["KOREBUILD_DOTNET_VERSION"] = "2.0.0";
                 File.WriteAllText(Path.Combine(benchmarkedApp, "global.json"), "{  \"sdk\": { \"version\": \"" + sdkVersion + "\" } }");
                 runtimeFrameworkVersion = "2.0.3";
-                aspNetCoreVersion = "2.0-*";
                 targetFramework = "netcoreapp2.0";
             }
 
             // Define which ASP.NET Core packages version to use
-            switch(job.AspNetCoreVersion)
+            switch(job.AspNetCoreVersion.ToLowerInvariant())
             {
-                case "Current":
-                    aspNetCoreVersion = "2.0-*";
+                case "current":
+                    aspNetCoreVersion = "2.0.*";
                     break;
-                case "Latest":
-                    aspNetCoreVersion = "2.1-*";
+                case "latest":
+                    // Temporary value to prevent feature branches from being used
+                    // aspNetCoreVersion = "2.1-*";
+                    aspNetCoreVersion = "2.1.0-preview2-3*";
                     break;
                 default:
                     aspNetCoreVersion = job.AspNetCoreVersion;
@@ -847,6 +889,11 @@ namespace BenchmarkServer
                 CloneDir(dotnetHome, dotnetDir);
             }
 
+            // Updating ServerJob to reflect actual versions used
+            job.AspNetCoreVersion = await GetLatestAspNetCoreRuntimeVersion(buildToolsPath);
+            job.RuntimeVersion = runtimeFrameworkVersion;
+            job.SdkVersion = sdkVersion;
+
             // Build and Restore
             var dotnetExecutable = GetDotNetExecutable(dotnetDir);
 
@@ -884,44 +931,38 @@ namespace BenchmarkServer
                     environmentVariables: env);
 
                 // Copy all output attachments
-                foreach (var attachment in job.Attachments)
+                foreach (var attachment in job.Attachments.Where(x => x.Location == AttachmentLocation.Output))
                 {
-                    if (attachment.Location == AttachmentLocation.Output)
+                    var filename = Path.Combine(outputFolder, attachment.Filename.Replace("\\", "/"));
+
+                    Log.WriteLine($"Creating output file: {filename}");
+
+                    if (File.Exists(filename))
                     {
-                        var filename = Path.Combine(outputFolder, attachment.Filename.Replace("\\", "/"));
-
-                        Log.WriteLine($"Creating output file: {filename}");
-
-                        if (File.Exists(filename))
-                        {
-                            File.Delete(filename);
-                        }
-
-                        await File.WriteAllBytesAsync(filename, attachment.Content);
+                        File.Delete(filename);
                     }
+
+                    File.Copy(attachment.TempFilename, filename);
                 }
             }
 
             // Copy all runtime attachments in all runtime folders
-            foreach (var attachment in job.Attachments)
+            foreach (var attachment in job.Attachments.Where(x => x.Location == AttachmentLocation.Runtime))
             {
                 var runtimeRoot = Path.Combine(dotnetDir, "shared", "Microsoft.NETCore.App");
 
                 foreach (var runtimeFolder in Directory.GetDirectories(runtimeRoot))
                 {
-                    if (attachment.Location == AttachmentLocation.Runtime)
+                    var filename = Path.Combine(runtimeFolder, attachment.Filename.Replace("\\", "/"));
+
+                    Log.WriteLine($"Creating runtime file: {filename}");
+
+                    if (File.Exists(filename))
                     {
-                        var filename = Path.Combine(runtimeFolder, attachment.Filename.Replace("\\", "/"));
-
-                        Log.WriteLine($"Creating runtime file: {filename}");
-
-                        if (File.Exists(filename))
-                        {
-                            File.Delete(filename);
-                        }
-
-                        await File.WriteAllBytesAsync(filename, attachment.Content);
+                        File.Delete(filename);
                     }
+
+                    File.Copy(attachment.TempFilename, filename);
                 }
             }
 
@@ -936,8 +977,22 @@ namespace BenchmarkServer
                 .Element("PropertyGroup")
                 .Element("MicrosoftNETCoreAppPackageVersion")
                 .Value;
+
             Log.WriteLine($"Detecting Universe Coherence runtime version: {latestRuntimeVersion}");
             return latestRuntimeVersion;
+        }
+
+        private static async Task<string> GetLatestAspNetCoreRuntimeVersion(string buildToolsPath)
+        {
+            var aspnetCoreRuntimePath = Path.Combine(buildToolsPath, "aspnetCoreRuntimePath.json");
+            await DownloadFileAsync(_latestAspnetCoreRuntimeUrl, aspnetCoreRuntimePath, maxRetries: 5);
+            var aspnetCoreRuntime = JObject.Parse(File.ReadAllText(aspnetCoreRuntimePath));
+
+            var latestAspNetCoreRuntime = (string)aspnetCoreRuntime["items"].Last()["upper"];
+
+
+            Log.WriteLine($"Detecting AspNet Core runtime version: {latestAspNetCoreRuntime}");
+            return latestAspNetCoreRuntime;
         }
 
         private static async Task DownloadBuildTools(string buildToolsPath)
@@ -1272,7 +1327,6 @@ namespace BenchmarkServer
                             var perfViewArguments = new Dictionary<string, string>();
                             perfViewArguments["AcceptEula"] = "";
                             perfViewArguments["NoGui"] = "";
-                            perfViewArguments["BufferSize"] = "256";
                             perfViewArguments["Process"] = process.Id.ToString();
 
                             if (!String.IsNullOrEmpty(job.CollectArguments))
