@@ -21,7 +21,7 @@ namespace Benchmarks.Data
         private readonly DbProviderFactory _dbProviderFactory;
         private readonly string _connectionString;
         private static readonly ThreadLocal<MySqlSession> _session = new ThreadLocal<MySqlSession>(() => {
-            var session = new MySqlSession("TFB-database", 3306, "benchmarkdbuser", "benchmarkdbpass", "helloword");
+            var session = new MySqlSession("TFB-database", 3306, "benchmarkdbuser", "benchmarkdbpass", "hello_world");
             session.ConnectAsync().GetAwaiter().GetResult();
             return session;
         });
