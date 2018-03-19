@@ -2,9 +2,11 @@
 
   <PropertyGroup>
     <PlaintextJobs>-j "$(RepositoryRoot)src/Benchmarks/benchmarks.plaintext.json"</PlaintextJobs>
+    <PlaintextPlatformJobs>-j "$(RepositoryRoot)src/PlatformBenchmarks/benchmarks.json"</PlaintextPlatformJobs>
     <HtmlJobs>-j "$(RepositoryRoot)src/Benchmarks/benchmarks.html.json"</HtmlJobs>
     <JsonJobs>-j "$(RepositoryRoot)src/Benchmarks/benchmarks.json.json"</JsonJobs>
     <MultiQueryJobs>-j "$(RepositoryRoot)src/Benchmarks/benchmarks.multiquery.json"</MultiQueryJobs>
+    <SignalRJobs>-j https://raw.githubusercontent.com/aspnet/SignalR/dev/benchmarks/BenchmarkServer/signalr.json -t SignalR -r signalr --projectFile benchmarks/BenchmarkServer/BenchmarkServer.csproj</SignalRJobs>
   </PropertyGroup>
 
   <ItemDefinitionGroup>
@@ -25,6 +27,7 @@
   
   <ItemGroup>
 
+    <CloudScenarios Include="-n PlaintextPlatform --webHost KestrelLibuv $(PlaintextPlatformJobs)" />
     <CloudScenarios Include="-n Plaintext --webHost KestrelSockets $(PlaintextJobs)" />
     <CloudScenarios Include="-n Plaintext --webHost KestrelLibuv $(PlaintextJobs)" />
     <CloudScenarios Include="-n MvcPlaintext --webHost KestrelSockets $(PlaintextJobs)" />
@@ -69,10 +72,18 @@
     <CloudScenarios Include="-n MvcDbFortunesRaw --webHost KestrelLibuv $(HtmlJobs) --database PostgreSql" />
     <CloudScenarios Include="-n MvcDbFortunesDapper --webHost KestrelLibuv $(HtmlJobs) --database PostgreSql" />
     <CloudScenarios Include="-n MvcDbFortunesEf --webHost KestrelLibuv $(HtmlJobs) --database PostgreSql" />
+
+    <CloudScenarios Include="-n SignalRBroadcast -p TransportType=WebSockets -p HubProtocol=json $(SignalRJobs)" />
+    <CloudScenarios Include="-n SignalRBroadcast -p TransportType=WebSockets -p HubProtocol=messagepack $(SignalRJobs)" />
+    <CloudScenarios Include="-n SignalRBroadcast -p TransportType=ServerSentEvents -p HubProtocol=json $(SignalRJobs)" />
+    <CloudScenarios Include="-n SignalRBroadcast -p TransportType=ServerSentEvents -p HubProtocol=messagepack $(SignalRJobs)" />
+    <CloudScenarios Include="-n SignalRBroadcast -p TransportType=LongPolling -p HubProtocol=json $(SignalRJobs)" />
+    <CloudScenarios Include="-n SignalRBroadcast -p TransportType=LongPolling -p HubProtocol=messagepack $(SignalRJobs)" />
   </ItemGroup>
 
   <ItemGroup>
 
+    <PhysicalScenarios Include="-n PlaintextPlatform --webHost KestrelLibuv $(PlaintextPlatformJobs)" />
     <PhysicalScenarios Include="-n Plaintext --webHost KestrelSockets $(PlaintextJobs)" />
     <PhysicalScenarios Include="-n Plaintext --webHost KestrelSockets $(PlaintextJobs)" Description="Baseline" AspNetCoreVersion="Current" RuntimeVersion="Current"/>
     
@@ -115,6 +126,12 @@
     <PhysicalScenarios Include="-n ResponseCachingPlaintextResponseNoCache --webHost KestrelLibuv --kestrelThreadCount 2 $(PlaintextJobs)" />
     <PhysicalScenarios Include="-n ResponseCachingPlaintextRequestNoCache --webHost KestrelLibuv --kestrelThreadCount 2 $(PlaintextJobs)" />
     <PhysicalScenarios Include="-n ResponseCachingPlaintextVaryByCached --webHost KestrelLibuv --kestrelThreadCount 2 $(PlaintextJobs)" />
+
+    <PhysicalScenarios Include="-n SignalRBroadcast -p TransportType=WebSockets -p HubProtocol=json $(SignalRJobs)" />
+    <PhysicalScenarios Include="-n SignalRBroadcast -p TransportType=WebSockets -p HubProtocol=messagepack $(SignalRJobs)" />
+    <PhysicalScenarios Include="-n SignalRBroadcast -p TransportType=ServerSentEvents -p HubProtocol=json $(SignalRJobs)" />
+    <PhysicalScenarios Include="-n SignalRBroadcast -p TransportType=LongPolling -p HubProtocol=json $(SignalRJobs)" />
+    <PhysicalScenarios Include="-n SignalRBroadcast -p TransportType=LongPolling -p HubProtocol=messagepack $(SignalRJobs)" />
 
   </ItemGroup>
 

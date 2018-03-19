@@ -23,8 +23,8 @@ Options:
   -m|--scheme            Scheme (http or https).  Default is http.
   -o|--source            Source dependency. Format is 'repo@branchOrCommit'. Repo can be a full URL, or a short name under https://github.com/aspnet.
   -w|--webHost           WebHost (e.g., KestrelLibuv, KestrelSockets, HttpSys). Default is KestrelSockets.
-  --aspnetCoreVersion    ASP.NET Core packages version (Current, Latest, or custom value). Current is the latest public version, Latest is the currently developped one. Default is Latest (2.1.0-*).
-  --runtimeVersion       .NET Core Runtime version (Current, Latest, or custom value). Current is the latest public version, Latest is the currently developped one. Default is Latest (2.1.0-*).
+  --aspnetCoreVersion    ASP.NET Core packages version (Current, Latest, or custom value). Current is the latest public version (2.0.*), Latest is the currently developped one. Default is Latest (2.1-*).
+  --runtimeVersion       .NET Core Runtime version (Current, Latest, Edge or custom value). Current is the latest public version, Latest is the one enlisted, Edge is the latest available. Default is Latest (2.1.0-*).
   --arguments            Arguments to pass to the application. (e.g., "--raw true")
   --port                 The port used to request the benchmarked application. Default is 5000.
   -r|--repository        Git repository containing the project to test.
@@ -36,11 +36,12 @@ Options:
   --clientThreads        Number of threads used by client. Default is 32.
   --connections          Number of connections used by client. Default is 256.
   --duration             Duration of test in seconds. Default is 15.
-  --warmup               Duration of warmup in seconds. Default is 15.
+  --warmup               Duration of warmup in seconds. Default is 15. 0 disables the warmup and is equivalent to --no-warmup.
+  --no-warmup            Disables the warmup phase.
   --header               Header added to request.
   --headers              Default set of HTTP headers added to request (None, Plaintext, Json, Html). Default is Html.
   --method               HTTP method of the request. Default is GET.
-  --properties"          Key value pairs of properties specific to the client running. e.g., ScriptName=pipeline;PipelineDepth=16"
+  -p|--properties        Key value pairs of properties specific to the client running. e.g., -p ScriptName=pipeline -p PipelineDepth=16"
   --path                 Relative URL where the client should send requests.
   --querystring          Querystring to add to the requests. (e.g., "?page=1")
   -j|--jobs              The path or url to the jobs definition.
@@ -60,7 +61,8 @@ Properties of the Wrk client
 Properties of the SignalR client
   HubProtocol            Name of the hub protocol to be used between client and server.
   TransportType          Name of the transport to communicate over.
-  LogLevel               LogLevel name for SignalR connections to use. e.g. 'Trace' or 'Warning'
+  LogLevel               LogLevel name for SignalR connections to use. e.g. 'Trace' or 'Warning'.
+  CollectLatency         Turns on collection of detailed latency, used for Percentiles, by default we just collect average Latency.
 ```
 
 ### Examples

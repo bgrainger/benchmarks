@@ -48,14 +48,14 @@ namespace BenchmarkServer
                 process.OutputDataReceived += (_, e) =>
                 {
                     outputBuilder.AppendLine(e.Data);
-                    Log.WriteLine($"[{logWorkingDirectory}] [{filename} {arguments}] {e.Data}");
+                    Log.WriteLine(e.Data);
                 };
 
                 var errorBuilder = new StringBuilder();
                 process.ErrorDataReceived += (_, e) =>
                 {
                     errorBuilder.AppendLine(e.Data);
-                    Log.WriteLine($"[{logWorkingDirectory}] [{filename} {arguments}] {e.Data}");
+                    Log.WriteLine(e.Data);
                 };
 
                 process.Start();
@@ -75,6 +75,7 @@ namespace BenchmarkServer
                 {
                     throw new InvalidOperationException($"Command {filename} {arguments} returned exit code {process.ExitCode}");
                 }
+
                 return new ProcessResult(outputBuilder.ToString(), errorBuilder.ToString(), process.ExitCode);
             }            
         }

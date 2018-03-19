@@ -19,14 +19,12 @@ using Benchmarks.ServerJob;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.CommandLineUtils;
 using Microsoft.Extensions.DependencyInjection;
-using Repository;
-
-using OperatingSystem = Benchmarks.ServerJob.OperatingSystem;
-using Newtonsoft.Json;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
+using Repository;
+using OperatingSystem = Benchmarks.ServerJob.OperatingSystem;
 
 namespace BenchmarkServer
 {
@@ -35,7 +33,9 @@ namespace BenchmarkServer
         private static readonly HttpClient _httpClient;
         private static readonly HttpClientHandler _httpClientHandler;
         private static readonly string _dotnetInstallRepoUrl = "https://raw.githubusercontent.com/dotnet/cli/master/scripts/obtain/";
-        private static readonly string _latestAspnetCoreRuntimeUrl = "https://dotnet.myget.org/F/aspnetcore-dev/api/v3/registration1/aspnetcoreruntime/index.json";
+        private static readonly string _latestAspnetCoreRuntimeUrl = "https://dotnet.myget.org/F/aspnetcore-dev/api/v3/registration1/Microsoft.AspNetCore.App/index.json";
+        private static readonly string _currentDotnetRuntimeUrl = "https://dotnetcli.blob.core.windows.net/dotnet/Runtime/Current/latest.version";
+        private static readonly string _edgeDotnetRuntimeUrl = "https://dotnetcli.blob.core.windows.net/dotnet/Runtime/master/latest.version";
         private static readonly string[] _dotnetInstallPaths = new string[] { "dotnet-install.sh", "dotnet-install.ps1" };
         private static readonly string _sdkVersionUrl = "https://raw.githubusercontent.com/aspnet/BuildTools/dev/files/KoreBuild/config/sdk.version";
         private static readonly string _universeDependenciesUrl = "https://raw.githubusercontent.com/aspnet/Universe/dev/build/dependencies.props";
@@ -295,10 +295,22 @@ namespace BenchmarkServer
                     {
                         string dotnetDir = dotnetHome;
                         string benchmarksDir = null;
+                        var standardOutput = new StringBuilder();
 
                         var perfviewEnabled = job.Collect && OperatingSystem == OperatingSystem.Windows;
 
-                        if (job.State == ServerState.Waiting)
+                        if (job.State == ServerState.Failed)
+                        {
+                            var now = DateTime.UtcNow;
+
+                            // Clean the job in case the driver is not running
+                            if (now - job.LastDriverCommunicationUtc > TimeSpan.FromSeconds(30))
+                            {
+                                Log.WriteLine($"Driver didn't communicate for {now - job.LastDriverCommunicationUtc}. Halting job.");
+                                job.State = ServerState.Deleting;
+                            }
+                        }
+                        else if (job.State == ServerState.Waiting)
                         {
                             // TODO: Race condition if DELETE is called during this code
                             try
@@ -326,10 +338,17 @@ namespace BenchmarkServer
                                     // returns the application directory and the dotnet directory to use
                                     (benchmarksDir, dotnetDir) = await CloneRestoreAndBuild(tempDir, job, dotnetDir);
 
-                                    Debug.Assert(process == null);
-                                    process = StartProcess(hostname, Path.Combine(tempDir, benchmarksDir), job, dotnetDir, perfviewEnabled);
+                                    if (benchmarksDir != null && dotnetDir != null)
+                                    {
+                                        Debug.Assert(process == null);
+                                        process = StartProcess(hostname, Path.Combine(tempDir, benchmarksDir), job, dotnetDir, perfviewEnabled, standardOutput);
 
-                                    job.ProcessId = process.Id;
+                                        job.ProcessId = process.Id;
+                                    }
+                                    else
+                                    {
+                                        job.State = ServerState.Failed;
+                                    }
                                 }
 
                                 var startMonitorTime = DateTime.UtcNow;
@@ -370,24 +389,35 @@ namespace BenchmarkServer
 
                                         if (process != null)
                                         {
-                                            // TODO: Accessing the TotalProcessorTime on OSX throws so just leave it as 0 for now
-                                            // We need to dig into this
-                                            var newCPUTime = OperatingSystem == OperatingSystem.OSX ? TimeSpan.Zero : process.TotalProcessorTime;
-                                            var elapsed = now.Subtract(lastMonitorTime).TotalMilliseconds;
-                                            var cpu = Math.Round((newCPUTime - oldCPUTime).TotalMilliseconds / (Environment.ProcessorCount * elapsed) * 100);
-                                            lastMonitorTime = now;
-                                            oldCPUTime = newCPUTime;
-
-                                            process.Refresh();
-
-                                            job.AddServerCounter(new ServerCounter
+                                            if (process.HasExited && process.ExitCode != 0)
                                             {
-                                                Elapsed = now - startMonitorTime,
-                                                WorkingSet = process.WorkingSet64,
-                                                CpuPercentage = cpu
-                                            });
+                                                Log.WriteLine($"Job failed");
+
+                                                job.Error = "Job failed at runtime\n" + standardOutput.ToString();
+                                                job.State = ServerState.Failed;
+                                            }
+                                            else
+                                            {
+
+                                                // TODO: Accessing the TotalProcessorTime on OSX throws so just leave it as 0 for now
+                                                // We need to dig into this
+                                                var newCPUTime = OperatingSystem == OperatingSystem.OSX ? TimeSpan.Zero : process.TotalProcessorTime;
+                                                var elapsed = now.Subtract(lastMonitorTime).TotalMilliseconds;
+                                                var cpu = Math.Round((newCPUTime - oldCPUTime).TotalMilliseconds / (Environment.ProcessorCount * elapsed) * 100);
+                                                lastMonitorTime = now;
+                                                oldCPUTime = newCPUTime;
+
+                                                process.Refresh();
+
+                                                job.AddServerCounter(new ServerCounter
+                                                {
+                                                    Elapsed = now - startMonitorTime,
+                                                    WorkingSet = process.WorkingSet64,
+                                                    CpuPercentage = cpu
+                                                });
+                                            }
                                         }
-                                        else
+                                        else if (!String.IsNullOrEmpty(dockerImage))
                                         {
                                             // Get docker stats
                                             var result = ProcessUtil.Run("docker", "container stats --no-stream --format \"{{.CPUPerc}}-{{.MemUsage}}\" " + dockerContainerId);
@@ -443,11 +473,7 @@ namespace BenchmarkServer
                             catch (Exception e)
                             {
                                 Log.WriteLine($"Error starting job '{job.Id}': {e}");
-
                                 job.State = ServerState.Failed;
-
-                                await DeleteJobAsync();
-
                                 continue;
                             }
                         }
@@ -536,19 +562,18 @@ namespace BenchmarkServer
                         {
                             await StopJobAsync();
 
-                            if (_cleanup && tempDir != null)
+                            if (_cleanup && !job.NoClean && tempDir != null)
                             {
                                 DeleteDir(tempDir);
                             }
 
                             // If a custom dotnet directory was used, clean it
-                            if (_cleanup && dotnetDir != dotnetHome)
+                            if (_cleanup && !job.NoClean && dotnetDir != dotnetHome)
                             {
                                 DeleteDir(dotnetDir);
                             }
 
                             // Clean attachments
-
                             foreach (var attachment in job.Attachments)
                             {
                                 try
@@ -757,8 +782,8 @@ namespace BenchmarkServer
             var sdkVersionPath = Path.Combine(buildToolsPath, Path.GetFileName(_sdkVersionUrl));
             await DownloadFileAsync(_sdkVersionUrl, sdkVersionPath, maxRetries: 5);
 
-            // var sdkVersion = File.ReadAllText(sdkVersionPath);
-            // Log.WriteLine($"Detecting latest SDK version: {sdkVersion}");
+            //var sdkVersion = File.ReadAllText(sdkVersionPath).Trim();
+            //Log.WriteLine($"Detecting compatible SDK version: {sdkVersion}");
 
             // This is the last known working SDK with Benchmarks on Linux
             var sdkVersion = "2.2.0-preview1-007522";
@@ -774,46 +799,57 @@ namespace BenchmarkServer
             string targetFramework;
             string runtimeFrameworkVersion;
             string aspNetCoreVersion;
+            string actualAspNetCoreVersion;
 
             if (!String.Equals(job.RuntimeVersion, "Current", StringComparison.OrdinalIgnoreCase))
             {
-                File.WriteAllText(Path.Combine(benchmarkedApp, "global.json"), "{  \"sdk\": { \"version\": \"" + sdkVersion + "\" } }");
                 targetFramework = "netcoreapp2.1";
 
                 if (String.Equals(job.RuntimeVersion, "Latest", StringComparison.OrdinalIgnoreCase))
                 {
                     runtimeFrameworkVersion = await GetLatestRuntimeVersion(buildToolsPath);
                 }
+                else if (String.Equals(job.RuntimeVersion, "Edge", StringComparison.OrdinalIgnoreCase))
+                {
+                    runtimeFrameworkVersion = await GetEdgeRuntimeVersion(buildToolsPath);
+                }
                 else
                 {
                     // Custom version
                     runtimeFrameworkVersion = job.RuntimeVersion;
+
+                    if (runtimeFrameworkVersion.StartsWith("2.0"))
+                    {
+                        targetFramework = "netcoreapp2.0";
+                    }
                 }
             }
             else
             {
-                // Latest public version
-                File.WriteAllText(Path.Combine(benchmarkedApp, "global.json"), "{  \"sdk\": { \"version\": \"" + sdkVersion + "\" } }");
-                runtimeFrameworkVersion = "2.0.3";
+                runtimeFrameworkVersion = await GetCurrentRuntimeVersion(buildToolsPath);
                 targetFramework = "netcoreapp2.0";
             }
 
+            var globalJson = "{ \"sdk\": { \"version\": \"" + sdkVersion + "\" } }";
+            Log.WriteLine($"Writing global.json with content: {globalJson}");
+            File.WriteAllText(Path.Combine(benchmarkedApp, "global.json"), globalJson);
+
             // Define which ASP.NET Core packages version to use
-            switch(job.AspNetCoreVersion.ToLowerInvariant())
+            switch (job.AspNetCoreVersion.ToLowerInvariant())
             {
                 case "current":
                     aspNetCoreVersion = "2.0.*";
+                    actualAspNetCoreVersion = aspNetCoreVersion;
                     break;
                 case "latest":
-                    // Temporary value to prevent feature branches from being used
-                    // aspNetCoreVersion = "2.1-*";
-                    aspNetCoreVersion = "2.1.0-preview2-3*";
+                    aspNetCoreVersion = "2.1-*";
+                    actualAspNetCoreVersion = await GetLatestAspNetCoreRuntimeVersion(buildToolsPath);
                     break;
                 default:
                     aspNetCoreVersion = job.AspNetCoreVersion;
+                    actualAspNetCoreVersion = aspNetCoreVersion;
                     break;
             }
-
 
             if (OperatingSystem == OperatingSystem.Windows)
             {
@@ -840,7 +876,7 @@ namespace BenchmarkServer
                 if (!_installedRuntimes.Contains(runtimeFrameworkVersion))
                 {
                     // Install runtime required for this scenario
-                    ProcessUtil.Run("powershell", $"-NoProfile -ExecutionPolicy unrestricted .\\dotnet-install.ps1 -Version {runtimeFrameworkVersion} -SharedRuntime",
+                    ProcessUtil.Run("powershell", $"-NoProfile -ExecutionPolicy unrestricted .\\dotnet-install.ps1 -Version {runtimeFrameworkVersion} -Runtime dotnet -NoPath",
                     workingDirectory: buildToolsPath,
                     environmentVariables: env);
 
@@ -870,7 +906,7 @@ namespace BenchmarkServer
                 if (!_installedRuntimes.Contains(runtimeFrameworkVersion))
                 {
                     // Install runtime required by coherence universe
-                    ProcessUtil.Run("/usr/bin/env", $"bash dotnet-install.sh --version {runtimeFrameworkVersion} --shared-runtime",
+                    ProcessUtil.Run("/usr/bin/env", $"bash dotnet-install.sh --version {runtimeFrameworkVersion} --runtime dotnet --no-path",
                     workingDirectory: buildToolsPath,
                     environmentVariables: env);
 
@@ -890,7 +926,7 @@ namespace BenchmarkServer
             }
 
             // Updating ServerJob to reflect actual versions used
-            job.AspNetCoreVersion = await GetLatestAspNetCoreRuntimeVersion(buildToolsPath);
+            job.AspNetCoreVersion = actualAspNetCoreVersion;
             job.RuntimeVersion = runtimeFrameworkVersion;
             job.SdkVersion = sdkVersion;
 
@@ -906,10 +942,6 @@ namespace BenchmarkServer
                 $"/p:BenchmarksRuntimeFrameworkVersion={runtimeFrameworkVersion} " +
                 $"/p:BenchmarksTargetFramework={targetFramework} ";
 
-            ProcessUtil.Run(dotnetExecutable, $"restore /p:VersionSuffix=zzzzz-99999 {buildParameters}",
-                workingDirectory: benchmarkedApp,
-                environmentVariables: env);
-
             if (job.UseRuntimeStore)
             {
                 ProcessUtil.Run(dotnetExecutable, $"build -c Release {buildParameters}",
@@ -918,17 +950,22 @@ namespace BenchmarkServer
             }
             else
             {
-                // This flag is necessary when using the .All metapackage
-                buildParameters += " /p:PublishWithAspNetCoreTargetManifest=false";
-
-                // This flag is necessary when using the .All metapackage since ASP.NET shared runtime 2.1
-                buildParameters += " /p:MicrosoftNETPlatformLibrary=Microsoft.NETCore.App";
-
                 var outputFolder = Path.Combine(benchmarkedApp, "published");
 
-                ProcessUtil.Run(dotnetExecutable, $"publish -c Release -o {outputFolder} {buildParameters}",
+                var arguments = $"publish -c Release -o {outputFolder} {buildParameters}";
+                var buildResults = ProcessUtil.Run(dotnetExecutable, arguments,
                     workingDirectory: benchmarkedApp,
-                    environmentVariables: env);
+                    environmentVariables: env,
+                    throwOnError: false);
+
+                if (buildResults.ExitCode != 0)
+                {
+                    job.Error = $"Command dotnet {arguments} returned exit code {buildResults.ExitCode} \n" +
+                        buildResults.StandardOutput + "\n" +
+                        buildResults.StandardError;
+
+                    return (null, null);
+                }
 
                 // Copy all output attachments
                 foreach (var attachment in job.Attachments.Where(x => x.Location == AttachmentLocation.Output))
@@ -969,6 +1006,9 @@ namespace BenchmarkServer
             return (benchmarkedDir, dotnetDir);
         }
 
+        /// <summary>
+        /// Retrieves the runtime version used on ASP.NET Coherence builds
+        /// </summary>
         private static async Task<string> GetLatestRuntimeVersion(string buildToolsPath)
         {
             var universeDependenciesPath = Path.Combine(buildToolsPath, Path.GetFileName(_universeDependenciesUrl));
@@ -982,6 +1022,9 @@ namespace BenchmarkServer
             return latestRuntimeVersion;
         }
 
+        /// <summary>
+        /// Retrieves the latest coherent ASP.NET version
+        /// </summary>
         private static async Task<string> GetLatestAspNetCoreRuntimeVersion(string buildToolsPath)
         {
             var aspnetCoreRuntimePath = Path.Combine(buildToolsPath, "aspnetCoreRuntimePath.json");
@@ -991,8 +1034,42 @@ namespace BenchmarkServer
             var latestAspNetCoreRuntime = (string)aspnetCoreRuntime["items"].Last()["upper"];
 
 
-            Log.WriteLine($"Detecting AspNet Core runtime version: {latestAspNetCoreRuntime}");
+            Log.WriteLine($"Detecting ASP.NET runtime version: {latestAspNetCoreRuntime}");
             return latestAspNetCoreRuntime;
+        }
+
+        /// <summary>
+        /// Retrieves the latest runtime version
+        /// </summary>
+        /// <param name="buildToolsPath"></param>
+        /// <returns></returns>
+        private static async Task<string> GetEdgeRuntimeVersion(string buildToolsPath)
+        {
+            var edgeRuntimePath = Path.Combine(buildToolsPath, "edgeDotnetRuntimeVersion.txt");
+            await DownloadFileAsync(_edgeDotnetRuntimeUrl, edgeRuntimePath, maxRetries: 5);
+            var content = await File.ReadAllLinesAsync(edgeRuntimePath);
+
+            // Read the last line that contains the version
+            var edgeDotnetRuntime = content.Last();
+
+            Log.WriteLine($"Detecting edge runtime version: {edgeDotnetRuntime}");
+            return edgeDotnetRuntime;
+        }
+
+        /// <summary>
+        /// Retrieves the Current runtime version
+        /// </summary>
+        private static async Task<string> GetCurrentRuntimeVersion(string buildToolsPath)
+        {
+            var currentRuntimePath = Path.Combine(buildToolsPath, "currentDotnetRuntimeVersion.txt");
+            await DownloadFileAsync(_currentDotnetRuntimeUrl, currentRuntimePath, maxRetries: 5);
+            var content = await File.ReadAllLinesAsync(currentRuntimePath);
+
+            // Read the last line that contains the version
+            var currentDotnetRuntime = content.Last();
+
+            Log.WriteLine($"Detecting current runtime version: {currentDotnetRuntime}");
+            return currentDotnetRuntime;
         }
 
         private static async Task DownloadBuildTools(string buildToolsPath)
@@ -1230,7 +1307,7 @@ namespace BenchmarkServer
                 : Path.Combine(dotnetHome, "dotnet");
         }
 
-        private static Process StartProcess(string hostname, string benchmarksRepo, ServerJob job, string dotnetHome, bool perfview)
+        private static Process StartProcess(string hostname, string benchmarksRepo, ServerJob job, string dotnetHome, bool perfview, StringBuilder standardOutput)
         {
             var serverUrl = $"{job.Scheme.ToString().ToLowerInvariant()}://{hostname}:{job.Port}";
             var dotnetFilename = GetDotNetExecutable(dotnetHome);
@@ -1312,6 +1389,7 @@ namespace BenchmarkServer
                 if (e != null && e.Data != null)
                 {
                     Log.WriteLine(e.Data);
+                    standardOutput.AppendLine(e.Data);
 
                     if (job.State == ServerState.Starting && (e.Data.ToLowerInvariant().Contains("started") || e.Data.ToLowerInvariant().Contains("listening")))
                     {
