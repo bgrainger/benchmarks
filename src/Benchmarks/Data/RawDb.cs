@@ -6,9 +6,12 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Benchmarks.Configuration;
 using Microsoft.Extensions.Options;
+using MySql.Data.MySqlClient;
+using MySqlConnector.Direct;
 
 namespace Benchmarks.Data
 {
@@ -17,12 +20,19 @@ namespace Benchmarks.Data
         private readonly IRandom _random;
         private readonly DbProviderFactory _dbProviderFactory;
         private readonly string _connectionString;
+        private readonly ThreadLocal<MySqlSession> _session;
 
         public RawDb(IRandom random, DbProviderFactory dbProviderFactory, IOptions<AppSettings> appSettings)
         {
             _random = random;
             _dbProviderFactory = dbProviderFactory;
             _connectionString = appSettings.Value.ConnectionString;
+            var csb = new MySqlConnectionStringBuilder(_connectionString);
+            _session = new ThreadLocal<MySqlSession>(() => {
+                var session = new MySqlSession(csb.Server, (int) csb.Port, csb.UserID, csb.Password, csb.Database);
+                session.ConnectAsync().GetAwaiter().GetResult();
+                return session;
+            });
         }
 
         public async Task<World> LoadSingleQueryRow()
@@ -141,27 +151,16 @@ namespace Benchmarks.Data
 
         public async Task<IEnumerable<Fortune>> LoadFortunesRows()
         {
-            var result = new List<Fortune>();
-
-            using (var db = _dbProviderFactory.CreateConnection())
-            using (var cmd = db.CreateCommand())
+            var result = new List<Fortune>(13);
+            var session = _session.Value;
+            await session.ExecuteAsync("SELECT * FROM fortune;");
+            while (await session.ReadAsync())
             {
-                cmd.CommandText = "SELECT id, message FROM fortune";
-
-                db.ConnectionString = _connectionString;
-                await db.OpenAsync();
-
-                using (var rdr = await cmd.ExecuteReaderAsync(CommandBehavior.CloseConnection))
+                result.Add(new Fortune
                 {
-                    while (await rdr.ReadAsync())
-                    {
-                        result.Add(new Fortune
-                        {
-                            Id = rdr.GetInt32(0),
-                            Message = rdr.GetString(1)
-                        });
-                    }
-                }
+                    Id = session.ReadInt32(),
+                    Message = session.ReadString(),
+                });
             }
 
             result.Add(new Fortune { Message = "Additional fortune added at request time." });
