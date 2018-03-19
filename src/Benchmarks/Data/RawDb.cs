@@ -20,19 +20,17 @@ namespace Benchmarks.Data
         private readonly IRandom _random;
         private readonly DbProviderFactory _dbProviderFactory;
         private readonly string _connectionString;
-        private readonly ThreadLocal<MySqlSession> _session;
+        private static readonly ThreadLocal<MySqlSession> _session = new ThreadLocal<MySqlSession>(() => {
+            var session = new MySqlSession("TFB-database", 3306, "benchmarkdbuser", "benchmarkdbpass", "helloword");
+            session.ConnectAsync().GetAwaiter().GetResult();
+            return session;
+        });
 
         public RawDb(IRandom random, DbProviderFactory dbProviderFactory, IOptions<AppSettings> appSettings)
         {
             _random = random;
             _dbProviderFactory = dbProviderFactory;
             _connectionString = appSettings.Value.ConnectionString;
-            var csb = new MySqlConnectionStringBuilder(_connectionString);
-            _session = new ThreadLocal<MySqlSession>(() => {
-                var session = new MySqlSession(csb.Server, (int) csb.Port, csb.UserID, csb.Password, csb.Database);
-                session.ConnectAsync().GetAwaiter().GetResult();
-                return session;
-            });
         }
 
         public async Task<World> LoadSingleQueryRow()
